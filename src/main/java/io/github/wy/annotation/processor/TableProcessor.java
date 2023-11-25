@@ -5,14 +5,22 @@ import javax.lang.model.SourceVersion;
 import javax.lang.model.element.Element;
 import javax.lang.model.element.ElementKind;
 import javax.lang.model.element.TypeElement;
+import javax.lang.model.element.VariableElement;
+import javax.lang.model.util.Elements;
 import javax.tools.Diagnostic;
+import javax.tools.FileObject;
 import javax.tools.JavaFileObject;
+import javax.tools.StandardLocation;
+import java.io.File;
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.lang.annotation.Annotation;
 import java.util.*;
-import java.util.stream.Collectors;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
+import static java.util.stream.Collectors.joining;
 import static java.util.stream.Collectors.toList;
 
 /**
@@ -36,10 +44,29 @@ public class TableProcessor extends AbstractProcessor {
     @Override
     public boolean process(Set<? extends TypeElement> annotations, RoundEnvironment roundEnv) {
         stream(annotations).findAny().ifPresent(tableAnno->{
+            stream(tableAnno.getEnclosedElements()).forEach(ele->{
+                log(tableAnno.toString(), ele.getKind().toString(), ele.toString());
+            });
+            
             stream(roundEnv.getElementsAnnotatedWith(tableAnno))
                     .filter(element->ElementKind.CLASS == element.getKind())
-                    .map(e->(TypeElement) e)
+                    .map(TypeElement.class::cast)
                     .forEach(classElement->{
+                        //Class<Annotation> annotationClass = (Class<Annotation>) tableAnno.getClass();// annotationForName();
+                        /*Annotation annotationObject = classElement.getAnnotation(annotationClass);
+                        Method method = TRY(()->annotationClass.getDeclaredMethod("interfaceName"));
+                        Object value = TRY(()->method.invoke(annotationObject));
+                        log("Got " + method.getName() + "'s value is :" + value);*/
+                        
+                        stream(classElement.getAnnotationMirrors()).forEach(annoMirror->{
+                            annoMirror.getElementValues().forEach((key, value)->{
+                                log("当前注解:" + annoMirror.toString(), key.toString(), value.toString());
+                            });
+                        });
+                        
+                        log("File access test: current path is " + TRY(()->new File("").getCanonicalFile().toString()));
+                        
+                        
                         final String packageName = packageName(classElement);
                         final String className = className(classElement);
                         final List<String> fieldsName = stream(classElement.getEnclosedElements())
@@ -47,7 +74,32 @@ public class TableProcessor extends AbstractProcessor {
                                 .map(e->e.getSimpleName().toString())
                                 .collect(toList());
                         writeJavaSourceFile(packageName, className, fieldsName);
+                        
+                        List<Map<String, String>> fields = stream(classElement.getEnclosedElements())
+                                .filter(ele->ele.getKind() == ElementKind.FIELD)
+                                .map(VariableElement.class::cast)
+                                .map(this::getFieldInfo)
+                                .collect(toList());
+                        stream(fields).forEach(f->log(f.toString()));
                     });
+            
+            log("修改一波源文件");
+            /*stream(roundEnv.getElementsAnnotatedWith(tableAnno))
+                    .filter(element->ElementKind.CLASS == element.getKind())
+                    .map(TypeElement.class::cast)
+                    .forEach(classElement->{
+                        List<Map<String, String>> fields = stream(classElement.getEnclosedElements())
+                                .filter(ele->ele.getKind() == ElementKind.FIELD)
+                                .map(VariableElement.class::cast)
+                                .map(this::getFieldInfo)
+                                .map(fieldMap->{
+                                    Elements elementUtils = processingEnv.getElementUtils();
+                                })
+                                .collect(toList());
+                        
+                        //classElement.getEnclosedElements().addAll();
+                    
+                    });*/
         });
         return true;
     }
@@ -58,6 +110,19 @@ public class TableProcessor extends AbstractProcessor {
     
     private String className(TypeElement type) {
         return type.getSimpleName().toString();
+    }
+    
+    private Map<String, String> getFieldInfo(VariableElement field) {
+        Map<String, String> map = new HashMap<>();
+        String name = field.getSimpleName().toString();
+        String modifiers = stream(field.getModifiers()).map(Objects::toString).collect(joining(" "));
+        String type = field.asType().toString();
+        String constValue = IF(field.getConstantValue()).map(Object::toString).orElse(null);
+        map.put("name", name);
+        map.put("modifiers", modifiers);
+        map.put("type", type);
+        map.put("const_value", constValue);
+        return map;
     }
     
     /**
@@ -78,6 +143,24 @@ public class TableProcessor extends AbstractProcessor {
             out.println();
             out.println("}");
         }
+        
+        try (PrintWriter out = createResourceFileAndGetWriter(packageName, className + ".xml")) {
+            out.println("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
+            out.println("<!DOCTYPE mapper PUBLIC \"-//mybatis.org//DTD Mapper 3.0//EN\" \"http://mybatis.org/dtd/mybatis-3-mapper.dtd\">");
+            out.println("<mapper namespace=\"" + classFullyName + "\">");
+            out.println(SP1 + "<resultMap id=\"BaseResultMap\" type=\"" + classFullyName + "\">");
+            for (String field : fieldsName) {
+                out.println(SP2 + "<result column=\"" + convertCamelToUnderscore(field) + "\" property=\"" + field + "\" jdbcType=\"VARCHAR\"/>");
+            }
+            out.println(SP1 + "</resultMap>");
+            out.println("</mapper>");
+        }
+        
+        try (PrintWriter out = createResourceFileAndGetWriter("", "META-INF/services/java.lang.List")) {
+            out.println("java.lang.String");
+            out.println("java.lang.Object");
+        }
+        
         log("Created a java source file: " + classFullyName);
     }
     
@@ -94,12 +177,30 @@ public class TableProcessor extends AbstractProcessor {
         }
     }
     
+    private PrintWriter createResourceFileAndGetWriter(String pkgName, String resourceName) {
+        try {
+            FileObject resource = filer.createResource(StandardLocation.CLASS_OUTPUT, pkgName, resourceName);
+            return new PrintWriter(resource.openWriter());
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+    
+    @SuppressWarnings("unchecked")
+    private <A extends Annotation> Class<A> annotationForName(String className) {
+        try {
+            return (Class<A>) Class.forName(className);
+        } catch (ClassNotFoundException e) {
+            throw new RuntimeException(e);
+        }
+    }
+    
     
     //####################################################################################
     //# Utils methods
     //####################################################################################
     private void log(String... msg) {
-        String allMsg = "TableProcessor: " + stream(msg).collect(Collectors.joining(" "));
+        String allMsg = "TableProcessor: " + stream(msg).collect(joining(" "));
         System.out.println(allMsg);
         messager.printMessage(Diagnostic.Kind.NOTE, allMsg);
     }
@@ -112,19 +213,48 @@ public class TableProcessor extends AbstractProcessor {
         return array == null ? Stream.empty() : Arrays.stream(array);
     }
     
+    private <E extends Object> Optional<E> IF(E chars) {
+        if (chars != null) return Optional.of(chars);
+        return Optional.empty();
+    }
+    
     private <E extends CharSequence> Optional<E> IF(E chars) {
         if (chars != null && chars.length() > 0) return Optional.of(chars);
         return Optional.empty();
     }
     
     private <E extends Collection<?>> Optional<E> IF(E collection) {
-        if (collection != null && collection.size() > 0) return Optional.of(collection);
+        if (collection != null && !collection.isEmpty()) return Optional.of(collection);
         return Optional.empty();
     }
     
     private <E extends Boolean, R> Optional<R> IF(E trueValue, R value) {
         if (trueValue != null && trueValue.booleanValue()) return Optional.of(value);
         return Optional.empty();
+    }
+    
+    private <R> R TRY(UncheckedSupplier<R> supplier) {
+        try {
+            return supplier.get();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+    
+    private interface UncheckedSupplier<R> {
+        R get() throws Exception;
+    }
+    
+    //# About String operations
+    public String convertCamelToUnderscore(String input) {
+        Pattern pattern = Pattern.compile("(?<=[a-z])[A-Z]");
+        Matcher matcher = pattern.matcher(input);
+        StringBuffer sb = new StringBuffer();
+        while (matcher.find()) {
+            matcher.appendReplacement(sb, "_" + matcher.group().toLowerCase());
+        }
+        matcher.appendTail(sb);
+        return sb.toString();
     }
     
 }
